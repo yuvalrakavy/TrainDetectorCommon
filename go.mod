@@ -1,3 +1,3 @@
-module github.com/yuvalrakavay/TrainDetectorCommon
+module github.com/yuvalrakavy/TrainDetectorCommon
 
 go 1.13
