@@ -51,7 +51,7 @@ type PacketReplyParser interface {
 	GetRequestNumber() RequestNumber // The request sequence number for which this packet is a reply
 }
 
-func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handleRawPacket func(*Connection, RawPacket) (*PacketReplyParser, error)) (*Connection, error) {
+func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handleRawPacket func(*Connection, RawPacket) (PacketReplyParser, error)) (*Connection, error) {
 	myAddress, err := net.ResolveUDPAddr("udp", udpAddress)
 	if err != nil {
 		return nil, err
@@ -105,8 +105,8 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handle
 				}
 
 				if packetReplyParser != nil {
-					if (*packetReplyParser).IsReply() {
-						requestNumber := (*packetReplyParser).GetRequestNumber()
+					if packetReplyParser.IsReply() {
+						requestNumber := packetReplyParser.GetRequestNumber()
 						pendingRequest, hasPendingRequest := connection.pendingRequests[requestNumber]
 
 						if hasPendingRequest {
