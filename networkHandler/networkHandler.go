@@ -98,7 +98,7 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handle
 				addPendingRequestMessage.requestNumberChannel <- requestNumber
 
 			case rawPacket := <-incomingPacketsChannel:
-				packetReplyParser, err := handleRawPacket(connection, rawPacket)
+				packetReplyParser, err := handleRawPacket(&connection, rawPacket)
 
 				if err != nil {
 					log.Println("Error in handling raw packet:", err.Error())
