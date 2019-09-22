@@ -34,8 +34,12 @@ func (header PacketHeader) IsValid() bool {
 	return header.PacketType == ^header.PacketTypeCompliment
 }
 
+func (packet TrainDetectorPacket) Reader() TrainDetectorPacketReader {
+	return TrainDetectorPacketReader{bytes.NewReader(packet)}
+}
+
 func (packet TrainDetectorPacket) Header() PacketHeader {
-	r := TrainDetectorPacketReader{bytes.NewReader(packet)}
+	r := packet.Reader()
 	header, err := r.Header()
 
 	if err != nil {
