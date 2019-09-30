@@ -38,7 +38,9 @@ type addPendingRequestMessage struct {
 }
 
 type Connection struct {
-	incomingConn      *net.UDPConn                     // listen to incoming UDP packets on this conn
+	UdpConnection           *net.UDPConn   // listen to incoming UDP packets on this conn
+	IncomingRequestsChannel chan RawPacket // Channel for receiveing incoming request (i.e. packets which are not replies)
+
 	nextRequestNumber RequestNumber                    // Sequence number to send with next request
 	pendingRequests   map[RequestNumber]pendingRequest // pending requests that were not yet acknowledged
 	noAckChannel      chan RequestNumber               // channel in which requestSenders report failure
@@ -51,7 +53,7 @@ type PacketReplyParser interface {
 	GetRequestNumber() RequestNumber // The request sequence number for which this packet is a reply
 }
 
-func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handleRawPacket func(*Connection, RawPacket) (PacketReplyParser, error)) (*Connection, error) {
+func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, getReplyParser func(RawPacket) PacketReplyParser) (*Connection, error) {
 	myAddress, err := net.ResolveUDPAddr("udp", udpAddress)
 	if err != nil {
 		return nil, err
@@ -63,11 +65,12 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handle
 	}
 
 	connection := Connection{
-		incomingConn:      incomingPacketsConn,
-		nextRequestNumber: 1,
-		pendingRequests:   make(map[RequestNumber]pendingRequest),
-		noAckChannel:      make(chan RequestNumber),
-		addRequestChannel: make(chan addPendingRequestMessage),
+		UdpConnection:           incomingPacketsConn,
+		nextRequestNumber:       1,
+		pendingRequests:         make(map[RequestNumber]pendingRequest),
+		noAckChannel:            make(chan RequestNumber),
+		addRequestChannel:       make(chan addPendingRequestMessage),
+		IncomingRequestsChannel: make(chan RawPacket, 2),
 	}
 
 	go func() {
@@ -84,7 +87,7 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handle
 			case <-pool.Done:
 				shouldTerminate = true
 				fmt.Println("Closing UDP connection")
-				connection.incomingConn.Close()
+				connection.UdpConnection.Close()
 
 				for _, pendingRequest := range connection.pendingRequests {
 					close(pendingRequest.requestAckChannel)
@@ -98,28 +101,24 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, handle
 				addPendingRequestMessage.requestNumberChannel <- requestNumber
 
 			case rawPacket := <-incomingPacketsChannel:
-				packetReplyParser, err := handleRawPacket(&connection, rawPacket)
+				packetReplyParser := getReplyParser(rawPacket)
 
-				if err != nil {
-					log.Println("Error in handling raw packet:", err.Error())
-				}
+				if packetReplyParser != nil && packetReplyParser.IsReply() {
+					requestNumber := packetReplyParser.GetRequestNumber()
+					pendingRequest, hasPendingRequest := connection.pendingRequests[requestNumber]
 
-				if packetReplyParser != nil {
-					if packetReplyParser.IsReply() {
-						requestNumber := packetReplyParser.GetRequestNumber()
-						pendingRequest, hasPendingRequest := connection.pendingRequests[requestNumber]
-
-						if hasPendingRequest {
-							if pendingRequest.removeOnReply {
-								close(pendingRequest.requestAckChannel)
-								delete(connection.pendingRequests, requestNumber)
-							}
-
-							pendingRequest.replyChannel <- &rawPacket
-						} else {
-							log.Printf("Received reply packet for non-pending request# %d\n", requestNumber)
+					if hasPendingRequest {
+						if pendingRequest.removeOnReply {
+							close(pendingRequest.requestAckChannel)
+							delete(connection.pendingRequests, requestNumber)
 						}
+
+						pendingRequest.replyChannel <- &rawPacket
+					} else {
+						log.Printf("Received reply packet for non-pending request# %d\n", requestNumber)
 					}
+				} else {
+					connection.IncomingRequestsChannel <- rawPacket
 				}
 
 			case failedRequestNumber := <-connection.noAckChannel:
