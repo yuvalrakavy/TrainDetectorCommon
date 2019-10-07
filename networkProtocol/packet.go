@@ -3,8 +3,6 @@ package networkProtocol
 import (
 	"bytes"
 	"encoding/binary"
-
-	"github.com/yuvalrakavy/TrainDetectorCommon/networkHandler"
 )
 
 type TrainDetectorPacket []byte
@@ -53,6 +51,6 @@ func (packet TrainDetectorPacket) IsReply() bool {
 	return (packet.Header().PacketType & PacketClassReply) != 0
 }
 
-func (packet TrainDetectorPacket) GetRequestNumber() networkHandler.RequestNumber {
-	return networkHandler.RequestNumber(packet.Header().RequestNumber)
+func (packet TrainDetectorPacket) GetRequestNumber() int {
+	return packet.Header().RequestNumber()
 }

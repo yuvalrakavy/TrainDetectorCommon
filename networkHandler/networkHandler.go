@@ -18,8 +18,6 @@ const MaxPacketSize = 4096
 //                  <--  Reply
 //
 
-type RequestNumber int
-
 type RawPacket struct {
 	PacketLength  int
 	PacketBytes   []byte
@@ -29,11 +27,10 @@ type RawPacket struct {
 type pendingRequest struct {
 	requestAckChannel chan interface{}
 	replyChannel      chan *RawPacket
-	removeOnReply     bool // Pending request should be removed when replied is accepted. This is the default
 }
 
 type addPendingRequestMessage struct {
-	requestNumberChannel chan RequestNumber
+	requestNumberChannel chan int
 	pendingRequest       pendingRequest
 }
 
@@ -41,16 +38,20 @@ type Connection struct {
 	UdpConnection           *net.UDPConn   // listen to incoming UDP packets on this conn
 	IncomingRequestsChannel chan RawPacket // Channel for receiveing incoming request (i.e. packets which are not replies)
 
-	nextRequestNumber RequestNumber                    // Sequence number to send with next request
-	pendingRequests   map[RequestNumber]pendingRequest // pending requests that were not yet acknowledged
-	noAckChannel      chan RequestNumber               // channel in which requestSenders report failure
-	addRequestChannel chan addPendingRequestMessage    // channel for adding a pending request
+	nextRequestNumber int                           // Sequence number to send with next request
+	pendingRequests   map[int]pendingRequest        // pending requests that were not yet acknowledged
+	noAckChannel      chan int                      // channel in which requestSenders report failure
+	addRequestChannel chan addPendingRequestMessage // channel for adding a pending request
 }
 
 // Implement that on packet to allow to handle request/reply association
 type PacketReplyParser interface {
-	IsReply() bool                   // Is this packet a replay packet
-	GetRequestNumber() RequestNumber // The request sequence number for which this packet is a reply
+	IsReply() bool         // Is this packet a replay packet
+	GetRequestNumber() int // The request sequence number for which this packet is a reply
+}
+
+type EncodablePacket interface {
+	Encode() []byte
 }
 
 func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, getReplyParser func(RawPacket) PacketReplyParser) (*Connection, error) {
@@ -67,8 +68,8 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, getRep
 	connection := Connection{
 		UdpConnection:           incomingPacketsConn,
 		nextRequestNumber:       1,
-		pendingRequests:         make(map[RequestNumber]pendingRequest),
-		noAckChannel:            make(chan RequestNumber),
+		pendingRequests:         make(map[int]pendingRequest),
+		noAckChannel:            make(chan int),
 		addRequestChannel:       make(chan addPendingRequestMessage),
 		IncomingRequestsChannel: make(chan RawPacket, 2),
 	}
@@ -108,11 +109,8 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, getRep
 					pendingRequest, hasPendingRequest := connection.pendingRequests[requestNumber]
 
 					if hasPendingRequest {
-						if pendingRequest.removeOnReply {
-							close(pendingRequest.requestAckChannel)
-							delete(connection.pendingRequests, requestNumber)
-						}
-
+						close(pendingRequest.requestAckChannel)
+						delete(connection.pendingRequests, requestNumber)
 						pendingRequest.replyChannel <- &rawPacket
 					} else {
 						log.Printf("Received reply packet for non-pending request# %d\n", requestNumber)
@@ -127,7 +125,7 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, getRep
 
 					if hasPendingRequest {
 						close(pendingRequest.requestAckChannel)
-						pendingRequest.replyChannel <- nil // No reply packet was received
+						close(pendingRequest.replyChannel)
 						delete(connection.pendingRequests, failedRequestNumber)
 					} else {
 						log.Printf("No reply was received for request# %d - this request is no longer pending\n", failedRequestNumber)
@@ -141,7 +139,7 @@ func StartIncomingPacketsHandling(pool *goPool.GoPool, udpAddress string, getRep
 	return &connection, nil
 }
 
-func (connection *Connection) allocateRequestNumber() RequestNumber {
+func (connection *Connection) allocateRequestNumber() int {
 	for i := 0; i < 20; i++ {
 		sequenceNumber := connection.nextRequestNumber
 		connection.nextRequestNumber++
@@ -156,13 +154,12 @@ func (connection *Connection) allocateRequestNumber() RequestNumber {
 	panic("NetworkManager: could not allocate unused request sequence number (probably bug)")
 }
 
-func (connection *Connection) CreateRequest(requestSender func(requestNumber RequestNumber), timeoutMs time.Duration, retries int, removeOnReply bool) chan *RawPacket {
-	requestNumberChannel := make(chan RequestNumber)
+func (connection *Connection) CreateRequest(requestSender func(requestNumber int), timeout time.Duration, retries int) chan *RawPacket {
+	requestNumberChannel := make(chan int)
 
 	pendingRequest := pendingRequest{
 		requestAckChannel: make(chan interface{}),
 		replyChannel:      make(chan *RawPacket),
-		removeOnReply:     removeOnReply,
 	}
 
 	connection.addRequestChannel <- addPendingRequestMessage{
@@ -178,18 +175,16 @@ func (connection *Connection) CreateRequest(requestSender func(requestNumber Req
 		requestSender(requestNumber) // Send the request
 
 		for {
-
 			select {
 			case <-pendingRequest.requestAckChannel:
 				return // Request was ack, no need to retry
 
-			case <-time.After(timeoutMs * time.Nanosecond * 1000000):
+			case <-time.After(timeout):
 				retry++
 				if retry < retries {
 					log.Printf("Timeout for reply on request# %d, resending request", requestNumber)
 					requestSender(requestNumber) // Send request again
 				} else {
-					log.Printf("Timeout for reply on request# %d, request was not replied - request failed", requestNumber)
 					connection.noAckChannel <- requestNumber
 					return
 				}
@@ -204,7 +199,7 @@ func incomingPacketsHandler(conn *net.UDPConn, incomingPacketsChannel chan<- Raw
 
 	for {
 		packetBytes := make([]byte, MaxPacketSize)
-		packetLength, err := conn.Read(packetBytes)
+		packetLength, remoteAddr, err := conn.ReadFrom(packetBytes)
 
 		if err != nil {
 			if *shouldTerminate {
@@ -215,6 +210,13 @@ func incomingPacketsHandler(conn *net.UDPConn, incomingPacketsChannel chan<- Raw
 			}
 		}
 
-		incomingPacketsChannel <- RawPacket{PacketBytes: packetBytes, PacketLength: packetLength, RemoteAddress: conn.RemoteAddr()}
+		incomingPacketsChannel <- RawPacket{PacketBytes: packetBytes, PacketLength: packetLength, RemoteAddress: remoteAddr}
 	}
+}
+
+func (rawPacket RawPacket) SendReply(udpConnection *net.UDPConn, packet EncodablePacket) error {
+	packetBytes := packet.Encode()
+
+	_, err := udpConnection.WriteTo(packetBytes, rawPacket.RemoteAddress)
+	return err
 }

@@ -19,11 +19,11 @@ const (
 	PacketClassNotification = PacketClassRequest
 	PacketClassAcknowledge  = PacketClassReply
 
-	PacketTypeIdentify        = 0
-	PacketTypeIdentifyRequest = PacketTypeIdentify | PacketClassRequest
-	PacketTypeIdentifyReply   = PacketTypeIdentify | PacketClassReply
+	PacketTypePleaseIdentify = 0
 
-	PacketTypeIdentifyAcknowledge = 1 | PacketClassAcknowledge
+	PakcketTypeIdentification           = 1
+	PacketTypeIdentificationInfo        = PakcketTypeIdentification | PacketClassRequest
+	PacketTypeIdentificationAcknowledge = PakcketTypeIdentification | PacketClassAcknowledge
 
 	PacketTypeConfig        = 2
 	PacketTypeConfigRequest = PacketTypeConfig | PacketClassRequest
@@ -46,40 +46,28 @@ const (
 	PacketTypeStateChangedAcknowledge  = PacketTypeStateChanged | PacketClassAcknowledge
 )
 
-var PacketTypeNameMap = map[byte]string{
-	PacketTypeIdentifyRequest:          "Identify Request",
-	PacketTypeIdentifyReply:            "Identify Reply",
-	PacketTypeIdentifyAcknowledge:      "Identify reply acknowlede",
-	PacketTypeConfigRequest:            "Config request",
-	PacketTypeConfigReply:              "Config reply",
-	PacketTypeGetStateRequest:          "GetState request",
-	PacketTypeGetStateReply:            "GetState reply",
-	PacketTypeSubscribeRequst:          "Subscribe request",
-	PacketTypeSubscribeReply:           "Subscribe reply",
-	PacketTypeUnsubscribeRequst:        "Unsubscribe request",
-	PacketTypeUnsubscribeReply:         "Unsubscribe reply",
-	PacketTypeStateChangedNotification: "State changed notification",
-	PacketTypeStateChangedAcknowledge:  "State changed acknowledged",
-}
-
-type RequestNumber uint16
+type PacketRequestNumber uint16
 
 type PacketString string
 
 type PacketHeader struct {
 	PacketType           byte
 	PacketTypeCompliment byte
-	RequestNumber        RequestNumber
+	PacketRequestNumber  PacketRequestNumber
 }
 
-func NewHeader(packetType byte, requestNumber RequestNumber) PacketHeader {
-	return PacketHeader{PacketType: packetType, PacketTypeCompliment: ^packetType, RequestNumber: requestNumber}
+func NewHeader(packetType byte, requestNumber int) PacketHeader {
+	return PacketHeader{PacketType: packetType, PacketTypeCompliment: ^packetType, PacketRequestNumber: PacketRequestNumber(requestNumber)}
 }
 
 func (header *PacketHeader) EncodeTo(buffer *bytes.Buffer) {
-	if err := binary.Write(buffer, binary.LittleEndian, &header); err != nil {
+	if err := binary.Write(buffer, binary.LittleEndian, header); err != nil {
 		panic(err)
 	}
+}
+
+func (header PacketHeader) RequestNumber() int {
+	return int(header.PacketRequestNumber)
 }
 
 func (s PacketString) EncodeTo(buffer *bytes.Buffer) {
@@ -123,37 +111,61 @@ func (packetReader TrainDetectorPacketReader) Decode() (interface{}, error) {
 	}
 
 	switch {
-	case header.PacketType == PacketTypeIdentifyRequest:
-		return packetReader.DecodeIdentifyRequest(&header)
+	case header.PacketType == PacketTypePleaseIdentify:
+		return packetReader.DecodePleaseIdentify(&header)
 
-	case header.PacketType == PacketTypeIdentifyReply:
-		return packetReader.DecodeIdentifyReply(&header)
+	case header.PacketType == PacketTypeIdentificationInfo:
+		return packetReader.DecodeIdentificationInfo(&header)
 
-	case header.PacketType == PacketTypeIdentifyAcknowledge:
-		return packetReader.DecodeIdentifyAcknowledge(&header)
+	case header.PacketType == PacketTypeIdentificationAcknowledge:
+		return packetReader.DecodeIdentificationAcknowledge(&header)
+
+	case header.PacketType == PacketTypeGetStateRequest:
+		return packetReader.DecodeGetStateRequest(&header)
+
+	case header.PacketType == PacketTypeGetStateReply:
+		return packetReader.DecodeGetStateReply(&header)
+
+	case header.PacketType == PacketTypeSubscribeRequst:
+		return packetReader.DecodeSubscribeRequest(&header)
+
+	case header.PacketType == PacketTypeSubscribeReply:
+		return packetReader.DecodeSubscribeReply(&header)
+
+	case header.PacketType == PacketTypeUnsubscribeRequst:
+		return packetReader.DecodeUnsubscribeRequest(&header)
+
+	case header.PacketType == PacketTypeUnsubscribeReply:
+		return packetReader.DecodeUnsubscribeReply(&header)
+
+	case header.PacketType == PacketTypeStateChangedNotification:
+		return packetReader.DecodeStateChangedNotification(&header)
+
+	case header.PacketType == PacketTypeStateChangedAcknowledge:
+		return packetReader.DecodeStateChangedAcknowledge(&header)
 
 	default:
 		return nil, fmt.Errorf("Packet seems to be valid, but has unsupported type %x", header.PacketType)
 	}
 }
 
-// IdentifyRequestPacket - packet is UDP broadcasted to all clients. Each client will responde with
-//   IdentifyReplyPacket
-type IdentifyRequestPacket struct {
+// PleaseIdentify - packet is UDP broadcasted to all clients. Each client will responde with
+//   IdentificationInfoPacket
+type PleaseIdentifyPacket struct {
 	Header             PacketHeader
 	MinProtocolVersion byte // Minmum protocol version supported by server
 	MaxProtocolVesion  byte // Maximum protocol version that server supports
 }
 
-func NewIdetifyRequst(requestNumber RequestNumber) IdentifyRequestPacket {
-	return IdentifyRequestPacket{
-		Header:             NewHeader(PacketTypeIdentifyRequest, requestNumber),
+func NewPleaseIdentify() *PleaseIdentifyPacket {
+	return &PleaseIdentifyPacket{
+		Header:             NewHeader(PacketTypePleaseIdentify, 0),
 		MinProtocolVersion: MinProtocolVersion,
 		MaxProtocolVesion:  MaxProtocolVersion,
 	}
 }
 
-func (packet *IdentifyRequestPacket) Encode() []byte {
+func (packet *PleaseIdentifyPacket) Encode() []byte {
 	b := bytes.NewBuffer(nil)
 	if err := binary.Write(b, binary.LittleEndian, packet); err != nil {
 		panic(err)
@@ -161,96 +173,380 @@ func (packet *IdentifyRequestPacket) Encode() []byte {
 	return b.Bytes()
 }
 
-func (packetReader TrainDetectorPacketReader) DecodeIdentifyRequest(header *PacketHeader) (IdentifyRequestPacket, error) {
+func (packetReader TrainDetectorPacketReader) DecodePleaseIdentify(header *PacketHeader) (*PleaseIdentifyPacket, error) {
 	minProtocolVersion, err := packetReader.ReadByte()
 	if err != nil {
-		return IdentifyRequestPacket{}, err
+		return nil, err
 	}
 
 	maxProtocolVersion, err := packetReader.ReadByte()
 	if err != nil {
-		return IdentifyRequestPacket{}, err
+		return nil, err
 	}
 
-	return IdentifyRequestPacket{
+	return &PleaseIdentifyPacket{
 		Header:             *header,
 		MinProtocolVersion: minProtocolVersion,
 		MaxProtocolVesion:  maxProtocolVersion,
 	}, nil
 }
 
-// IdentifyRequestReply - packet is sent as a reply to IdentifyRequest.
+// IdentificationInfo - packet is sent as a reply to IdentifyRequest.
 //  The client will resend this packet if after no IdentifyAcknowledge is not received
-type IdentifyReplyPacket struct {
+type IndenticiationInfoPacket struct {
 	Header          PacketHeader
 	ProtocolVersion byte         // Protocol version to be used (must be in the reange IdentifyRequest.MinProtocolVersion...IdentifyRequest.MaxProtocolVersion)
-	MacAddress      PacketString // Mac address of this device
+	SensorsCount    uint16       // Number of sensors
 	Name            PacketString // Name of this device
 }
 
-func NewIdetifyReply(requestNumber RequestNumber, macAddress PacketString, name PacketString) IdentifyReplyPacket {
-	return IdentifyReplyPacket{
-		Header:          NewHeader(PacketTypeIdentifyReply, requestNumber),
+func NewIdentificationInfo(requestNumber int, sensorCount int, name PacketString) *IndenticiationInfoPacket {
+	return &IndenticiationInfoPacket{
+		Header:          NewHeader(PacketTypeIdentificationInfo, requestNumber),
 		ProtocolVersion: CurrentProtocolVersion,
-		MacAddress:      macAddress,
+		SensorsCount:    uint16(sensorCount),
 		Name:            name,
 	}
 }
 
-func (packet *IdentifyReplyPacket) Encode() []byte {
+func (packet *IndenticiationInfoPacket) Encode() []byte {
 	buffer := bytes.NewBuffer(nil)
 	packet.Header.EncodeTo(buffer)
-
-	packet.MacAddress.EncodeTo(buffer)
+	binary.Write(buffer, binary.LittleEndian, &packet.ProtocolVersion)
+	binary.Write(buffer, binary.LittleEndian, &packet.SensorsCount)
 	packet.Name.EncodeTo(buffer)
 
 	return buffer.Bytes()
 }
 
-func (packetReader TrainDetectorPacketReader) DecodeIdentifyReply(header *PacketHeader) (IdentifyReplyPacket, error) {
+func (packetReader TrainDetectorPacketReader) DecodeIdentificationInfo(header *PacketHeader) (*IndenticiationInfoPacket, error) {
 	protocolVersion, err := packetReader.ReadByte()
 	if err != nil {
-		return IdentifyReplyPacket{}, err
+		return nil, err
 	}
 
-	macAddress, err := packetReader.DecodeString()
+	var sensorCount uint16
+	err = binary.Read(packetReader, binary.LittleEndian, &sensorCount)
 	if err != nil {
-		return IdentifyReplyPacket{}, err
+		return nil, err
 	}
 
 	name, err := packetReader.DecodeString()
 	if err != nil {
-		return IdentifyReplyPacket{}, err
+		return nil, err
 	}
 
-	return IdentifyReplyPacket{
+	return &IndenticiationInfoPacket{
 		Header:          *header,
 		ProtocolVersion: protocolVersion,
-		MacAddress:      macAddress,
+		SensorsCount:    sensorCount,
 		Name:            name,
 	}, nil
 }
 
 // IdentifyAcknowledge - Send as a when IdentifyReply packet is received.
 // The client will stop sending IdentifyReply packets
-type IdentifyAcknowledgePacket struct {
+type IdentificationAcknowledgePacket struct {
 	Header PacketHeader
 }
 
-func NewIdentifyAcknowledge(requestNumber RequestNumber) IdentifyAcknowledgePacket {
-	return IdentifyAcknowledgePacket{
-		Header: NewHeader(PacketTypeIdentifyAcknowledge, requestNumber),
+func NewIdentificationAcknowledge(requestNumber int) *IdentificationAcknowledgePacket {
+	return &IdentificationAcknowledgePacket{
+		Header: NewHeader(PacketTypeIdentificationAcknowledge, requestNumber),
 	}
 }
 
-func (packet *IdentifyAcknowledgePacket) Encode() []byte {
+func (packet *IdentificationAcknowledgePacket) Encode() []byte {
 	buffer := bytes.NewBuffer(nil)
 	packet.Header.EncodeTo(buffer)
 	return buffer.Bytes()
 }
 
-func (packetReader TrainDetectorPacketReader) DecodeIdentifyAcknowledge(header *PacketHeader) (IdentifyAcknowledgePacket, error) {
-	return IdentifyAcknowledgePacket{
+func (packetReader TrainDetectorPacketReader) DecodeIdentificationAcknowledge(header *PacketHeader) (*IdentificationAcknowledgePacket, error) {
+	return &IdentificationAcknowledgePacket{
+		Header: *header,
+	}, nil
+}
+
+// GetStateRequest
+//   The controller will response with the current sensor cover/uncover state
+type GetStateRequestPacket struct {
+	Header PacketHeader
+}
+
+func NewGetStateRequest(requestNumber int) *GetStateRequestPacket {
+	return &GetStateRequestPacket{
+		Header: NewHeader(PacketTypeGetStateRequest, requestNumber),
+	}
+}
+
+func (packet *GetStateRequestPacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeGetStateRequest(header *PacketHeader) (*GetStateRequestPacket, error) {
+	return &GetStateRequestPacket{
+		Header: *header,
+	}, nil
+}
+
+// GetStateReply
+//   Reply to GetStateRequest with the current sensor state
+type GetStateReplyPacket struct {
+	Header  PacketHeader
+	Version uint32
+	States  []bool // True - sensor is covered, false - sensor is not covered
+}
+
+func NewGetStateReply(requestNumber int, version uint32, states []bool) *GetStateReplyPacket {
+	return &GetStateReplyPacket{
+		Header:  NewHeader(PacketTypeGetStateReply, requestNumber),
+		Version: version,
+		States:  states,
+	}
+}
+
+func (packet *GetStateReplyPacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+
+	// write version
+	if err := binary.Write(buffer, binary.LittleEndian, &packet.Version); err != nil {
+		panic(err)
+	}
+
+	// Write count
+	buffer.WriteByte(byte(len(packet.States)))
+	if err := binary.Write(buffer, binary.LittleEndian, packet.States); err != nil {
+		panic(err)
+	}
+
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeGetStateReply(header *PacketHeader) (*GetStateReplyPacket, error) {
+	var version uint32
+
+	if err := binary.Read(packetReader, binary.LittleEndian, &version); err != nil {
+		panic(err)
+	}
+
+	count, err := packetReader.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	states := make([]bool, count)
+	if err := binary.Read(packetReader, binary.LittleEndian, &states); err != nil {
+		return nil, err
+	}
+
+	return &GetStateReplyPacket{
+		Header:  *header,
+		Version: version,
+		States:  states,
+	}, nil
+}
+
+// SubscribeRequest - get notified when sensor value is changed
+type SubscribeRequestPacket struct {
+	Header PacketHeader
+}
+
+func NewSubcribeRequestPacket(requestNumber int) *SubscribeRequestPacket {
+	return &SubscribeRequestPacket{
+		Header: NewHeader(PacketTypeSubscribeRequst, requestNumber),
+	}
+}
+
+func (packet *SubscribeRequestPacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeSubscribeRequest(header *PacketHeader) (*SubscribeRequestPacket, error) {
+	return &SubscribeRequestPacket{
+		Header: *header,
+	}, nil
+}
+
+// SubscribeReply
+type SubscribeReplyPacket struct {
+	Header PacketHeader
+}
+
+func NewSubscribeReplyPacket(requestNumber int) *SubscribeReplyPacket {
+	return &SubscribeReplyPacket{
+		Header: NewHeader(PacketTypeSubscribeReply, requestNumber),
+	}
+}
+
+func (packet *SubscribeReplyPacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeSubscribeReply(header *PacketHeader) (*SubscribeReplyPacket, error) {
+	return &SubscribeReplyPacket{
+		Header: *header,
+	}, nil
+}
+
+// UnsubscribeRequest - get notified when sensor value is changed
+type UnsubscribeRequestPacket struct {
+	Header PacketHeader
+}
+
+func NewUnsubscribeRequestPacket(requestNumber int) *UnsubscribeRequestPacket {
+	return &UnsubscribeRequestPacket{
+		Header: NewHeader(PacketTypeUnsubscribeRequst, requestNumber),
+	}
+}
+
+func (packet *UnsubscribeRequestPacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeUnsubscribeRequest(header *PacketHeader) (*UnsubscribeRequestPacket, error) {
+	return &UnsubscribeRequestPacket{
+		Header: *header,
+	}, nil
+}
+
+// UnsubscribeReply
+type UnsubscribeReplyPacket struct {
+	Header PacketHeader
+}
+
+func NewUnsubscribeReplyPacket(requestNumber int) *UnsubscribeReplyPacket {
+	return &UnsubscribeReplyPacket{
+		Header: NewHeader(PacketTypeUnsubscribeReply, requestNumber),
+	}
+}
+
+func (packet *UnsubscribeReplyPacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeUnsubscribeReply(header *PacketHeader) (*UnsubscribeReplyPacket, error) {
+	return &UnsubscribeReplyPacket{
+		Header: *header,
+	}, nil
+}
+
+// StateChangedNotification
+//  Sent to subscribers on sensor state change
+type StateChangedNotificationPacket struct {
+	Header       PacketHeader
+	SensorNumber byte
+	IsCovered    bool
+	Version      uint32
+	States       []bool
+}
+
+func NewStateChangedNotificationPacket(requestNumber int, sensorNumber byte, isCovered bool, version uint32, states []bool) *StateChangedNotificationPacket {
+	return &StateChangedNotificationPacket{
+		Header:       NewHeader(PacketTypeStateChangedNotification, requestNumber),
+		SensorNumber: sensorNumber,
+		IsCovered:    isCovered,
+		Version:      version,
+		States:       states,
+	}
+}
+
+func (packet *StateChangedNotificationPacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+
+	buffer.WriteByte(packet.SensorNumber)
+
+	if packet.IsCovered {
+		buffer.WriteByte(1)
+	} else {
+		buffer.WriteByte(0)
+	}
+
+	if err := binary.Write(buffer, binary.LittleEndian, &packet.Version); err != nil {
+		panic(err)
+	}
+
+	buffer.WriteByte(byte(len(packet.States)))
+	if err := binary.Write(buffer, binary.LittleEndian, packet.States); err != nil {
+		panic(err)
+	}
+
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeStateChangedNotification(header *PacketHeader) (*StateChangedNotificationPacket, error) {
+	sensorNumber, err := packetReader.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	isCovered := false
+
+	if isCoveredValue, err := packetReader.ReadByte(); err != nil {
+		return nil, err
+	} else if isCoveredValue != 0 {
+		isCovered = true
+	}
+
+	var version uint32
+	if err := binary.Read(packetReader, binary.LittleEndian, &version); err != nil {
+		return nil, err
+	}
+
+	count, err := packetReader.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	states := make([]bool, count)
+	if err := binary.Read(packetReader, binary.LittleEndian, &states); err != nil {
+		return nil, err
+	}
+
+	return &StateChangedNotificationPacket{
+		Header:       *header,
+		SensorNumber: sensorNumber,
+		IsCovered:    isCovered,
+		Version:      version,
+		States:       states,
+	}, nil
+}
+
+type StateChangedAcknowledgePacket struct {
+	Header PacketHeader
+}
+
+func NewStateChangedAcknowledgePacket(requestNumber int) *StateChangedAcknowledgePacket {
+	return &StateChangedAcknowledgePacket{
+		Header: NewHeader(PacketTypeStateChangedAcknowledge, requestNumber),
+	}
+}
+
+func (packet *StateChangedAcknowledgePacket) Encode() []byte {
+	buffer := bytes.NewBuffer(nil)
+	packet.Header.EncodeTo(buffer)
+
+	return buffer.Bytes()
+}
+
+func (packetReader TrainDetectorPacketReader) DecodeStateChangedAcknowledge(header *PacketHeader) (*StateChangedAcknowledgePacket, error) {
+	return &StateChangedAcknowledgePacket{
 		Header: *header,
 	}, nil
 }
